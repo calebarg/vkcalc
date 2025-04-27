@@ -1,0 +1,265 @@
+#version 450
+
+//
+// vkcalc.comp
+//
+// Caleb Barger
+// 04/23/2025
+//
+
+layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer SSBO {
+  int text[];
+};
+
+const int TokenKind_None = 0;
+const int TokenKind_NumericLiteral = 1;
+const int TokenKind_Operator = 2;
+
+struct Token
+{
+  int kind;
+  int value;
+};
+
+Token tokens[128]; // TODO(calebarg): Make this a big ol ssbo.
+int token_count = 0;
+int global_token_idx = 0; // TODO(calebarg): Parse state?
+
+// <expr> ::= <factor> (('+'|'-') <factor>)*
+// <factor> ::= <unary> (('*'|'/') <unary>)*
+// <unary> ::= ('-' <unary>) | <primary>
+// <primary> ::= [0-9]+
+
+const int ASTNodeKind_None = 0;
+const int ASTNodeKind_Binary = 1;
+const int ASTNodeKind_Unary = 2;
+const int ASTNodeKind_Literal = 3;
+
+struct ASTNode
+{
+  int kind;
+  int lhs_idx;
+  int value;
+  int rhs_idx;
+};
+
+ASTNode ast_nodes[128]; // ALSO make this a big ssbo?
+int ast_node_count = 0;
+
+struct ParseStackEntry
+{
+  int ast_node_idx;
+  int token_idx;
+};
+
+ParseStackEntry parse_stack[128];
+int parse_stack_count = 0;
+
+void parse_stack_push(int ast_node_idx, int token_idx)
+{
+  parse_stack[parse_stack_count++] =
+    ParseStackEntry(ast_node_idx, token_idx);
+}
+
+ParseStackEntry parse_stack_pop()
+{
+  ParseStackEntry result;
+  result = parse_stack[--parse_stack_count];
+  return result;
+}
+
+ParseStackEntry parse_stack_peek()
+{
+  ParseStackEntry result;
+  result = parse_stack[parse_stack_count - 1];
+  return result;
+}
+
+int parse_primary()
+{
+  ast_nodes[ast_node_count] = ASTNode(ASTNodeKind_Literal, -1, tokens[global_token_idx++].value, -1);
+  return ast_node_count++;
+}
+
+int parse_unary()
+{
+  while (tokens[global_token_idx].value == 45)
+  {
+    int op = tokens[global_token_idx++].value;
+    ast_nodes[ast_node_count] = ASTNode(ASTNodeKind_Unary, -1, op, -1);
+    parse_stack_push(ast_node_count++, 0);
+  }
+
+  int unary_idx = parse_primary();
+  while(parse_stack_count > 0)
+  {
+    ParseStackEntry parse_stack_entry = parse_stack_pop();
+    int ast_node_idx = parse_stack_entry.ast_node_idx;
+    ast_nodes[ast_node_idx].lhs_idx = unary_idx;
+    unary_idx = ast_node_idx;
+  }
+  return unary_idx;
+}
+
+int parse_factor()
+{
+  int factor_idx = parse_unary();
+  while ((tokens[global_token_idx].value == 42) || (tokens[global_token_idx].value == 47))
+  {
+    int op = tokens[global_token_idx++].value;
+    int rhs_idx = parse_unary();
+    ast_nodes[ast_node_count] = ASTNode(ASTNodeKind_Binary, factor_idx, op, rhs_idx);
+    factor_idx = ast_node_count++;
+  }
+  return factor_idx;
+}
+
+int parse_expr()
+{
+  int expr_idx = parse_factor();
+  while ((tokens[global_token_idx].value == 43) || (tokens[global_token_idx].value == 45))
+  {
+    int op = tokens[global_token_idx++].value;
+    int rhs_idx = parse_factor();
+    ast_nodes[ast_node_count] = ASTNode(ASTNodeKind_Binary, expr_idx, op, rhs_idx);
+    expr_idx = ast_node_count++;
+  }
+  return expr_idx;
+}
+
+const int integer_symbol_reverse[128] = {
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xFF,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xFF,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+};
+
+Token lex_peek(int curr)
+{
+  Token result = Token(TokenKind_None, 0);
+  if (curr + 1 < token_count)
+  {
+    result = tokens[curr + 1];
+  }
+  return result;
+}
+
+bool is_digit(int c)
+{
+ return (integer_symbol_reverse[c & 0x7F] != 0xFF);
+}
+
+void main()
+{
+  ////////////////////////////////
+  //~ calebarg: Lexer
+
+  int curr = 0;
+  for (;curr < text.length();)
+  {
+    int start = curr;
+    switch (text[curr])
+    {
+      case 48: // 0-9
+      case 49:
+      case 50:
+      case 51:
+      case 52:
+      case 53:
+      case 54:
+      case 55:
+      case 56:
+      case 57:
+      {
+        int value = 0;
+        for (;(curr < text.length()) && is_digit(text[curr]); ++curr)
+        {
+          value *= 10;
+          value += integer_symbol_reverse[text[curr]&0x7F];
+        }
+        tokens[token_count++] = Token(TokenKind_NumericLiteral, value);
+      } break;
+      case 42: // '*'
+      case 43: // '+'
+      case 45: // '-'
+      case 47: // '/'
+      {
+        tokens[token_count++] = Token(TokenKind_Operator, text[curr]);
+        curr++;
+      } break;
+      default:
+      {
+        curr++;
+      } break;
+    }
+  }
+
+  ////////////////////////////////
+  //~ calebarg: Parse + eval
+
+  int root_idx = parse_expr();
+  int curr_idx = root_idx;
+  int last_idx_visited = -1;
+  while ((parse_stack_count > 0) ||
+         (curr_idx != -1))
+  {
+    if (curr_idx != -1)
+    {
+      parse_stack_push(curr_idx, 0);
+      curr_idx = ast_nodes[curr_idx].lhs_idx;
+    }
+    else
+    {
+      ParseStackEntry parse_stack_entry = parse_stack_peek();
+      int peek_idx = parse_stack_entry.ast_node_idx;
+      ASTNode peek_node = ast_nodes[peek_idx];
+
+      if ((peek_node.rhs_idx != -1) &&
+          (last_idx_visited != peek_node.rhs_idx))
+      {
+        curr_idx = peek_node.rhs_idx;
+      }
+      else
+      {
+        switch(peek_node.kind)
+        {
+          case ASTNodeKind_Binary:
+          {
+            int lhs = ast_nodes[peek_node.lhs_idx].value;
+            int rhs = ast_nodes[peek_node.rhs_idx].value;
+            switch (peek_node.value)
+            {
+              case 43: lhs += rhs; break;
+              case 45: lhs -= rhs; break;
+              case 42: lhs *= rhs; break;
+              case 47: lhs /= rhs; break;
+              default: break;
+            }
+            ast_nodes[peek_idx].value = lhs;
+          } break;
+          case ASTNodeKind_Unary:
+          {
+            int value = ast_nodes[peek_node.lhs_idx].value;
+            if (peek_node.value == 45) // "-"
+            {
+              value *= -1;
+            }
+            ast_nodes[peek_idx].value = value;
+          } break;
+          default: break;
+        }
+        parse_stack_pop();
+        last_idx_visited = peek_idx;
+      }
+    }
+  }
+
+  // HACK(calebarg): Write result to magic SSBO offset.
+  text[512 + 0] = ast_nodes[root_idx].value;
+}

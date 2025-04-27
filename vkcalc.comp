@@ -140,16 +140,6 @@ const int integer_symbol_reverse[128] = {
   0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
 };
 
-Token lex_peek(int curr)
-{
-  Token result = Token(TokenKind_None, 0);
-  if (curr + 1 < token_count)
-  {
-    result = tokens[curr + 1];
-  }
-  return result;
-}
-
 bool is_digit(int c)
 {
  return (integer_symbol_reverse[c & 0x7F] != 0xFF);
